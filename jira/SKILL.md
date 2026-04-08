@@ -99,11 +99,26 @@ curl -s -X POST "${AUTH[@]}" "${JSON[@]}" \
 | ResolvedDate | customfield_11606 | DateTime | `"2026-04-06T09:50:00.000+0800"` |
 | Workdays | customfield_11701 | Number | `1` |
 
+**⚠️ Workdays 确认规则：** 在关闭 issue（设置 Workdays 字段）前，**必须**先向用户确认填写值，不得自动推断或默认为 1：
+
+```
+⚠️ 即将关闭 {KEY}，请确认 Workdays（工作天数）：
+建议值：[基于上下文的推断，若无法推断则留空]
+请输入实际工作天数（直接回复数字）：
+```
+
+收到用户确认后，再执行字段更新：
+```bash
+curl -s -X PUT "${AUTH[@]}" "${JSON[@]}" \
+  -d '{"fields":{"customfield_11605":{"name":"mark.w"},"customfield_11701":<用户确认的值>}}' \
+  "$JIRA/issue/${KEY}"
+```
+
 批量更新示例：
 ```bash
 for key in TCG-XXX TCG-YYY; do
   curl -s -X PUT "${AUTH[@]}" "${JSON[@]}" \
-    -d '{"fields":{"customfield_11605":{"name":"mark.w"},"customfield_11701":1}}' \
+    -d '{"fields":{"customfield_11605":{"name":"mark.w"},"customfield_11701":<用户确认的值>}}' \
     "$JIRA/issue/${key}"
 done
 ```
