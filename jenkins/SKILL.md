@@ -1,6 +1,8 @@
 ---
 name: jenkins
 description: Use when the user asks to trigger, inspect, or manage Jenkins jobs via REST API, especially on the test Jenkins instance at dev-jenkins03.tc168.cloud. Requires JENKINS_API_TOKEN environment variable.
+version: "1.0"
+updated: "2026-04-15"
 ---
 
 # Jenkins
@@ -141,6 +143,10 @@ JOB_PATH="/job/example"
 BUILD_NUMBER=123
 curl -fsS "${AUTH[@]}" "$JENKINS_BASE$JOB_PATH/$BUILD_NUMBER/consoleText"
 ```
+
+## API Reference
+
+完整端点列表、参数说明、诊断建议和推荐输出格式，参见 [references/api_reference.md](references/api_reference.md)。
 
 ## 输出约定
 

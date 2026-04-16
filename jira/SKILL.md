@@ -1,6 +1,8 @@
 ---
 name: jira
 description: Interact with Jira via curl REST API for issue management, search, transitions, comments, sprints, and more. Use when the user asks to create/read/update/search Jira issues, check sprint status, add comments, transition issue status, assign issues, or perform any Jira operation. Requires JIRA_PAT environment variable.
+version: "1.0"
+updated: "2026-04-15"
 ---
 
 # Jira
