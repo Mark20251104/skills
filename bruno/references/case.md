@@ -1,4 +1,3 @@
-
 # Bruno Case — 生成测试脚本
 
 分析业务代码，为 API 端点生成 `.bru` 测试文件。
@@ -6,30 +5,49 @@
 ## 流程
 
 1. 从用户输入提取 HTTP 方法、路径、基础 URL
-2. 定位对应的 Controller/Router/Handler 源码，提取：
-   - 请求参数（path、query、body）及类型（从方法签名、DTO/Schema 类）
-   - 响应结构（从返回类型、VO/Response 类）
-   - 认证方式（Bearer Token、API Key 等）
-   - 校验规则（`@Valid`、`@NotNull`、Zod schema 等必填字段）
-3. 生成 `.bru` 文件到 `bruno-collection/{branchName}`（若不存在，提示先运行 `init`）
+2. 定位对应的 Controller / Router / Handler 源码，提取：
+   - **请求参数**：path、query、body（从方法签名、DTO/Schema）
+   - **响应结构**：返回类型、VO/Response 类
+   - **认证方式**：Bearer Token、API Key、Cookie 等
+   - **校验规则**：`@Valid` / `@NotNull` / Zod schema 等必填字段
+3. **询问分组名 `<group>`**（如需求号 / 模块名）；用户未提供则回退当前 git 分支名
+4. 确定目标目录：`bruno-collection/<group>/<endpoint>/`
+5. **依赖前置数据判断**：若目标 API 为 GET / PUT / PATCH / DELETE 等需操作既有资源的端点，先在源码中定位对应注册 / 创建 API（如 `POST /users`、`POST /auth/register`），生成前置 `00-setup-*.bru` 用例
+6. 若 `bruno-collection/` 不存在，提示先运行 `init`
+7. 生成 `.bru` 文件，已存在则跳过（除非用户要求覆盖）
 
 ## .bru 文件格式
 
+> **语言约定**：`meta.name`、`test()` 描述、`docs` 块、行内注释一律使用中文（与代码库注释语言保持一致）。变量名、HTTP 方法、字段键名保持英文。
+
 ```bru
 meta {
-  name: <请求名称>
+  name: 创建用户 - 正常场景
   type: http
-  seq: <序号>
+  seq: 1
 }
 
 <method> {
-  url: {{baseUrl}}<path>
-  body: <none|json|form-urlencoded>
-  auth: <none|bearer>
+  url: {{baseUrl}}<path>?<query>
+  body: <none|json|form-urlencoded|multipart-form>
+  auth: <none|bearer|basic|apikey>
+}
+
+params:query {
+  page: 1
+  size: 20
+}
+
+params:path {
+  id: 1
 }
 
 headers {
   Content-Type: application/json
+}
+
+auth:bearer {
+  token: {{token}}
 }
 
 body:json {
@@ -39,25 +57,39 @@ body:json {
 }
 
 tests {
-  test("status 200", function() {
+  test("状态码应为 200", function() {
     expect(res.status).to.equal(200);
   });
 
-  test("response has data", function() {
+  test("响应应包含 data 字段", function() {
     const body = res.getBody();
     expect(body).to.have.property("data");
   });
 }
+
+docs {
+  创建用户接口的正常场景：提交合法的用户名与邮箱，期望返回 200 与新建用户 ID。
+}
 ```
+
+## 参数处理规则
+
+| 来源 | Bruno 块 | 示例 |
+|------|---------|------|
+| `@PathVariable` / `:id` | `params:path` + URL 内 `:id` 或 `{{id}}` | `/users/:id` |
+| `@RequestParam` / `req.query` | `params:query` | `?page=1` |
+| `@RequestBody` / `req.body` | `body:json` | JSON DTO |
+| `@RequestHeader` | `headers` | `X-Trace-Id` |
+| 认证 Token | `auth:bearer` + `{{token}}` | Bearer JWT |
 
 ## 断言规则
 
-所有正常用例统一断言状态码 200（除非是异常用例或用户明确指定其他状态码）。
+正常用例统一断言 `200`（除非异常用例或用户明确指定）。
 
 | HTTP 方法 | 默认断言 |
 |-----------|---------|
 | GET       | 状态码 200、响应体非空、关键字段存在 |
-| POST      | 状态码 200、响应含 id 或关键字段 |
+| POST      | 状态码 200、响应含 `id` 或关键字段 |
 | PUT/PATCH | 状态码 200、响应含更新后字段 |
 | DELETE    | 状态码 200 |
 
@@ -65,23 +97,145 @@ tests {
 
 ## 命名与组织
 
-- 文件名：`<method>-<kebab-path>.bru`，如 `/api/users/{id}` → `get-user-by-id.bru`
-- `seq` 按生成顺序递增
-- 路径变量 `{id}` → `{{id}}`
-- 多接口按资源分组为子目录：
+### 目录结构
+
+固定两级：`bruno-collection/<group>/<endpoint>/`。
+
+- `<group>`：**优先询问用户**指定（如需求号 `JIRA-123`、模块名 `user-mgmt`、版本号 `v2-api`）；用户未提供时回退使用当前 git 分支名 `git rev-parse --abbrev-ref HEAD`，并将 `/` 替换为 `-`
+- `<endpoint>`：端点语义名，`<method>-<kebab-path>`，例：`POST /api/users` → `create-user`、`GET /api/users/{id}` → `get-user-by-id`
+
+**询问示例**：
+> 请提供本批用例的分组名（如需求号 / 模块名）。直接回车将使用当前分支名 `<branch>` 作为分组。
 
 ```
 bruno-collection/
-└── users/
-    ├── get-users.bru
-    ├── get-user-by-id.bru
-    ├── create-user.bru
-    └── delete-user.bru
+└── feature-user-mgmt/              # group（用户指定，回退用 branchName）
+    ├── create-user/                # endpoint
+    │   ├── 01-success.bru
+    │   ├── 02-missing-required.bru
+    │   ├── 03-invalid-email.bru
+    │   ├── 04-duplicate-email.bru
+    │   └── 05-unauthorized.bru
+    ├── get-user-by-id/
+    │   ├── 01-success.bru
+    │   └── 02-not-found.bru
+    └── delete-user/
+        ├── 01-success.bru
+        └── 02-forbidden.bru
 ```
+
+### 文件命名
+
+`<seq>-<scenario>.bru`，`scenario` 用语义化 kebab：
+
+| 类别 | 命名示例 |
+|------|---------|
+| 正常 | `success` / `happy-path` |
+| 参数校验 | `missing-<field>` / `invalid-<field>` |
+| 业务错误 | `not-found` / `duplicate` / `conflict` |
+| 鉴权 | `unauthorized` / `forbidden` |
+| 边界值 | `boundary-<case>` |
+
+### `seq` 规则
+
+- 同端点目录内 `seq` 控制执行顺序
+- **状态依赖**用例必须严格递增（如 create → get → update → delete）
+- 无状态用例可乱序，建议 `success` 优先（`01-`）
+- 路径变量 `{id}` / `:id` → `{{id}}`
+
+### 单接口 vs 多场景
+
+| 场景数 | 组织方式 |
+|--------|---------|
+| 单一正常用例 | 仍建一层 `endpoint/` 目录，文件命名为 `01-success.bru`，便于后续扩展 |
+| 多场景 | 同目录下按上表分类，统一 `seq` 前缀 |
+
+### 跨场景共享数据
+
+后续场景需复用前序响应（如 `userId`、`token`）时，使用 Bruno 的 `vars:post-response` 写入环境变量，后续 `.bru` 以 `{{userId}}` 引用，禁止硬编码。
+
+```bru
+vars:post-response {
+  userId: res.body.data.id
+}
+```
+
+## 前置数据准备（Setup）
+
+**适用场景**：目标 API 为 GET / PUT / PATCH / DELETE 等依赖既有资源的端点。
+
+**原则**：测试自给自足，不依赖数据库已有数据；通过同集合内的注册 / 创建 API 即时生成所需资源。
+
+### 流程
+
+1. 在源码中定位资源的注册 / 创建端点（如 `POST /users`、`POST /auth/register`）
+2. 在目标 endpoint 目录下生成 `00-setup-<resource>.bru`，`seq=0` 确保最先执行
+3. setup 用例通过 `vars:post-response` 捕获关键字段（`id`、`token`、唯一键等）写入环境变量
+4. 后续场景以 `{{xxxId}}` / `{{token}}` 引用
+5. 如需清理，再追加 `99-teardown-<resource>.bru` 调用对应删除 API
+
+### 示例
+
+```
+bruno-collection/
+└── feature-user-mgmt/
+    └── get-customer-by-id/
+        ├── 00-setup-register-customer.bru   # 注册新用户，捕获 customerId
+        ├── 01-success.bru               # 使用 {{customerId}} 查询
+        ├── 02-not-found.bru             # 故意传错 ID
+        └── 99-teardown-delete-customer.bru  # 可选：清理用户
+```
+
+**00-setup-register-customer.bru** 关键片段：
+
+```bru
+meta {
+  name: 前置 - 注册客户
+  type: http
+  seq: 0
+}
+
+post {
+  url: {{baseUrl}}/api/register
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "name": "test-customer-{{$randomInt}}",
+    "email": "test-{{$timestamp}}@example.com"
+  }
+}
+
+vars:post-response {
+  customerId: res.body.data.id
+}
+
+tests {
+  test("前置数据准备成功", function() {
+    expect(res.status).to.equal(200);
+    expect(res.body.data).to.have.property("id");
+  });
+}
+
+docs {
+  为后续依赖客户资源的查询/更新/删除用例注册新客户，并将 customerId 写入环境变量。
+}
+```
+
+### 约束
+
+- setup 用例失败应阻断后续执行（CI 配合 `bru run --bail`）
+- 唯一字段（email、customername）使用 `{{$timestamp}}` / `{{$randomInt}}` 避免冲突
+- 共享多端点的 setup 不重复生成；同 `<group>` 内可复用同一环境变量
+- 若注册 API 本身已有 `01-success.bru` 用例并捕获了变量，可直接在依赖端点目录用 `vars:pre-request` 复用，不必重复 setup
 
 ## 约束
 
+（全局约定见 `SKILL.md`：固定根目录、`{{var}}` 语法、禁硬编码凭证）
+
 - 不覆盖已有 `.bru` 文件，除非用户明确要求
-- 环境变量使用 `{{variableName}}` 语法
-- 若用户提供响应体示例，优先用实际字段生成断言
-- 若无法定位源码，退回基于 URL 和 HTTP 方法的通用断言
+- 优先使用用户提供的真实响应体生成断言
+- 无法定位源码时，退回基于 URL 与 HTTP 方法的通用断言
+- **中文描述**：`meta.name`、`test()` 描述、`docs` 块、行内注释统一使用中文；保留英文的仅限：变量名、HTTP 方法、JSON 字段键名、URL 路径
