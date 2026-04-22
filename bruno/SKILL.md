@@ -1,7 +1,7 @@
 ---
 name: bruno
 description: Bruno（开源 API 测试工具）工作流：初始化 bruno-collection、基于 Controller/Router 源码生成 .bru 测试脚本（含多场景与前置数据准备）、通过 bru CLI 运行测试并输出报告。Use when user mentions Bruno、bru、.bru、bruno-collection、接口测试、API 测试脚本、API 自动化测试、bru run 等关键词。
-version: "1.3"
+version: "1.4"
 updated: "2026-04-22"
 ---
 

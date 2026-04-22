@@ -84,16 +84,88 @@ docs {
 
 ## 断言规则
 
-正常用例统一断言 `200`（除非异常用例或用户明确指定）。
+### 状态码断言（强制）
 
-| HTTP 方法 | 默认断言 |
-|-----------|---------|
-| GET       | 状态码 200、响应体非空、关键字段存在 |
-| POST      | 状态码 200、响应含 `id` 或关键字段 |
-| PUT/PATCH | 状态码 200、响应含更新后字段 |
-| DELETE    | 状态码 200 |
+**每个 `.bru` 文件的 `tests` 块首条断言必须是状态码断言**，且必须与场景匹配：
 
-基于代码分析额外生成：响应字段类型断言、必填字段非空断言、数组长度断言。
+```bru
+tests {
+  test("状态码应为 XXX", function() {
+    expect(res.status).to.equal(XXX);
+  });
+  // ... 其余业务断言
+}
+```
+
+### 正常场景默认状态码
+
+| HTTP 方法 | 默认状态码 | 附加断言 |
+|-----------|-----------|---------|
+| GET       | 200 | 响应体非空、关键字段存在 |
+| POST（创建） | 200 或 201 | 响应含 `id` 或关键字段（按源码返回决定 200/201） |
+| PUT/PATCH | 200（或 204） | 响应含更新后字段（204 时断言 body 为空） |
+| DELETE    | 200（或 204） | 204 时断言 body 为空 |
+
+> 优先从源码实际返回值（Controller / ResponseEntity / handler return）判定 200 vs 201/204，不要盲目全填 200。
+
+### 异常场景状态码映射
+
+根据场景命名（见"文件命名"表）自动选择期望状态码：
+
+| 场景类别 | 命名示例 | 期望状态码 | 附加断言 |
+|---------|---------|-----------|---------|
+| 正常 | `success` / `happy-path` | 200 / 201 | 关键字段存在 |
+| 参数校验失败 | `missing-<field>` / `invalid-<field>` / `boundary-<case>` | 400 | 响应含错误信息字段（`message` / `errors`） |
+| 未认证 | `unauthorized` | 401 | —— |
+| 无权限 | `forbidden` | 403 | —— |
+| 资源不存在 | `not-found` | 404 | —— |
+| 方法不允许 | `method-not-allowed` | 405 | —— |
+| 资源冲突 | `duplicate` / `conflict` | 409 | 响应含冲突原因 |
+| 请求体过大 | `payload-too-large` | 413 | —— |
+| 限流 | `rate-limited` | 429 | —— |
+| 服务端异常（模拟） | `server-error` | 5xx | 仅在明确要求时生成 |
+
+### 业务断言补充
+
+基于源码分析额外生成：
+- 响应字段类型断言（`expect(body.data.id).to.be.a("number")`）
+- 必填字段非空断言（`expect(body.data.name).to.not.be.empty`）
+- 数组长度断言（`expect(body.data.list).to.have.lengthOf.above(0)`）
+- 枚举值断言（若 DTO 定义了固定集合）
+
+### 异常用例示例
+
+```bru
+meta {
+  name: 创建用户 - 邮箱格式非法
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/users
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "name": "test",
+    "email": "not-an-email"
+  }
+}
+
+tests {
+  test("状态码应为 400", function() {
+    expect(res.status).to.equal(400);
+  });
+
+  test("响应应包含错误信息", function() {
+    const body = res.getBody();
+    expect(body).to.have.property("message");
+  });
+}
+```
 
 ## 命名与组织
 
