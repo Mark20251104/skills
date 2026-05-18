@@ -9,6 +9,7 @@ Agent skills 合集，每个 skill 封装了与特定工具/服务交互的完�
 | [bruno](bruno/SKILL.md) | Bruno API 工具集：初始化项目、生成测试脚本、运行测试 | — |
 | [jenkins](jenkins/SKILL.md) | 通过 REST API 触发、查询和管理 Jenkins Job | `JENKINS_API_TOKEN`、`JENKINS_USER` |
 | [jira](jira/SKILL.md) | 通过 REST API 管理 Jira issue、评论、流转和 Sprint | `JIRA_PAT` |
+| [tmux-pane](tmux-pane/SKILL.md) | 在当前 tmux 会话中创建并驱动侧边 pane（默认右侧），用于 SSH、日志监控、并行命令 | — |
 
 ## 结构约定
 
