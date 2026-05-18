@@ -5,9 +5,21 @@ description: Use when the user needs a persistent secondary shell alongside the 
 
 # tmux-pane
 
-在当前 tmux 会话中创建并驱动一个**默认位于右侧**的侧边 pane，用于 SSH 远程连接、日志监控、服务状态查询等需要持续运行的任务，主对话 pane 保持自由。
+在**当前 tmux window** 中创建并驱动一个**默认位于右侧**的侧边 pane，用于 SSH 远程连接、日志监控、服务状态查询等需要持续运行的任务，主对话 pane 保持自由。
 
 仅当用户明确要求"底部"或"下方"时才改用底部布局（`split-window -v`）。
+
+## 操作范围硬约束（必读）
+
+**本 skill 仅允许操作"当前 window"内的 pane**，禁止跨 window 行为：
+
+- ✅ 允许：在当前 window 内 `split-window`、`send-keys`、`capture-pane`、`kill-pane`、`resize-pane`
+- ❌ 禁止：`tmux list-panes -a` / `-s`（列出所有 window / 整个 session 的 pane）
+- ❌ 禁止：`split-window -t <other-window>` 或任何 `-t` 指向其他 window 的命令
+- ❌ 禁止：对不属于当前 window 的 pane ID 发送命令或捕获（即使拿到了 ID）
+- ❌ 禁止：`new-window` / `select-window` / `move-window` 等切换或创建 window 的命令
+
+理由：用户的主对话发生在某个具体 window，跨 window 操作会污染其他工作空间或意外干扰用户视觉焦点。所有侧边 pane 都必须与主 pane**可见地并排**，方便用户随时看到。
 
 ## 何时使用此 skill
 
@@ -20,24 +32,32 @@ description: Use when the user needs a persistent secondary shell alongside the 
 
 ## 前置检查
 
-执行任何 tmux 命令前确认在 tmux 会话内：
+执行任何 tmux 命令前确认在 tmux 会话内，并锁定当前 window ID：
 
 ```bash
 [ -n "$TMUX" ] && echo "in tmux" || echo "NOT in tmux"
+
+# 锁定当前 window ID，后续所有 split / list 都用 -t 限定
+CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+echo "operating in window: $CURRENT_WINDOW"
 ```
 
 若不在 tmux 中，告知用户需要先 `tmux new -s <name>` 或附加到已有会话。
+
+`$CURRENT_WINDOW` 一旦锁定，整个 skill 生命周期内不应再变化。每次创建或操作 pane 都用 `-t "$CURRENT_WINDOW"` 显式限定作用域。
 
 ## 核心工作流（四步）
 
 ### Step 1：创建 pane
 
+`-t "$CURRENT_WINDOW"` 显式限定在当前 window 创建：
+
 ```bash
 # 默认：右侧新建（垂直分割），占 40% 宽
-tmux split-window -h -p 40
+tmux split-window -h -p 40 -t "$CURRENT_WINDOW"
 
 # 用户明确要求底部时（水平分割）
-tmux split-window -v -p 30
+tmux split-window -v -p 30 -t "$CURRENT_WINDOW"
 ```
 
 **关于焦点**：`split-window` 后焦点会切到新 pane，但**所有后续 `send-keys` / `capture-pane` 都用 `-t` 目标语法寻址**，与当前焦点无关，因此**不需要也不应该手动 `select-pane` 切回主 pane**。
@@ -47,11 +67,18 @@ tmux split-window -v -p 30
 **强烈推荐**：split 时直接用 `-P -F '#{pane_id}'` 把新 pane ID 写入 shell 变量，后续所有操作都用 `-t "$SIDE_PANE"` 寻址，不依赖 layout 和焦点：
 
 ```bash
-SIDE_PANE=$(tmux split-window -h -p 40 -P -F '#{pane_id}')
+SIDE_PANE=$(tmux split-window -h -p 40 -t "$CURRENT_WINDOW" -P -F '#{pane_id}')
 tmux send-keys -t "$SIDE_PANE" "<命令>" Enter
 ```
 
 > ⚠️ 不要写成 `tmux split-window ... | read SIDE_PANE`——管道右侧在 subshell 执行，变量赋值丢失。必须用 `$(...)`。
+
+**可选校验**（确认新 pane 确实在当前 window，paranoid 模式）：
+
+```bash
+PANE_WIN=$(tmux display-message -p -t "$SIDE_PANE" '#{window_id}')
+[ "$PANE_WIN" = "$CURRENT_WINDOW" ] || { echo "ERROR: pane not in current window"; exit 1; }
+```
 
 如果忘记保存 ID，仍可用方向/历史 token 兜底：
 
@@ -112,8 +139,11 @@ tmux capture-pane -t "$SIDE_PANE" -p -S -
 ### 模板 A：SSH 远程服务诊断（默认右侧）
 
 ```bash
+# 0. 锁定当前 window
+CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+
 # 1. 右侧建 pane，立刻锁定 ID
-SIDE_PANE=$(tmux split-window -h -p 40 -P -F '#{pane_id}')
+SIDE_PANE=$(tmux split-window -h -p 40 -t "$CURRENT_WINDOW" -P -F '#{pane_id}')
 
 # 2. SSH 连接
 tmux send-keys -t "$SIDE_PANE" "ssh <host>" Enter
@@ -134,8 +164,10 @@ tmux send-keys -t "$SIDE_PANE" "tail -f /path/to/service.log" Enter
 ### 模板 B：本地长任务并行运行（用户明确要求底部时）
 
 ```bash
+CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+
 # 仅当用户明确说"底部/下方"才用 -v；默认仍是右侧 -h
-SIDE_PANE=$(tmux split-window -v -p 25 -P -F '#{pane_id}')
+SIDE_PANE=$(tmux split-window -v -p 25 -t "$CURRENT_WINDOW" -P -F '#{pane_id}')
 tmux send-keys -t "$SIDE_PANE" "npm run dev" Enter
 # 主 pane 继续执行其他任务，无需等待 dev server
 ```
@@ -143,32 +175,39 @@ tmux send-keys -t "$SIDE_PANE" "npm run dev" Enter
 ### 模板 C：多 pane 监控仪表板（用 pane ID 精确寻址）
 
 ```bash
-# 主 pane + 右上（日志） + 右下（指标）
-LOG_PANE=$(tmux split-window -h -p 40 -P -F '#{pane_id}')
+CURRENT_WINDOW=$(tmux display-message -p '#{window_id}')
+
+# 主 pane + 右上（日志） + 右下（指标），均在当前 window
+LOG_PANE=$(tmux split-window -h -p 40 -t "$CURRENT_WINDOW" -P -F '#{pane_id}')
 METRICS_PANE=$(tmux split-window -v -t "$LOG_PANE" -P -F '#{pane_id}')
 
 tmux send-keys -t "$LOG_PANE" "tail -f /var/log/app.log" Enter
 tmux send-keys -t "$METRICS_PANE" "htop" Enter
 ```
 
-多 pane 场景下方向 token 易混淆——**只要 pane 数 ≥ 3 就强制用 `%<id>` 寻址**。查询全部 pane ID：
+多 pane 场景下方向 token 易混淆——**只要 pane 数 ≥ 3 就强制用 `%<id>` 寻址**。查询当前 window 的所有 pane ID（**不要加 `-a` / `-s`**）：
 
 ```bash
-tmux list-panes -F '#{pane_id} #{pane_current_command} #{pane_width}x#{pane_height}'
+tmux list-panes -t "$CURRENT_WINDOW" -F '#{pane_id} #{pane_current_command} #{pane_width}x#{pane_height}'
 ```
 
 ## 常用辅助命令
 
+所有命令都限定在 `$CURRENT_WINDOW`：
+
 ```bash
-tmux list-panes -F '#{pane_id} #{pane_current_command}'   # 列出所有 pane
-tmux kill-pane -t "$SIDE_PANE"                             # 关闭指定 pane
-tmux select-pane -t "$SIDE_PANE"                           # 切换焦点（一般不需要）
-tmux resize-pane -t "$SIDE_PANE" -R 10                     # 右扩 10 列
-tmux clear-history -t "$SIDE_PANE"                         # 清空 pane 历史缓冲
+tmux list-panes -t "$CURRENT_WINDOW" -F '#{pane_id} #{pane_current_command}'   # 列出当前 window 的 pane
+tmux kill-pane -t "$SIDE_PANE"                                                 # 关闭指定 pane（pane ID 自带 window 归属）
+tmux select-pane -t "$SIDE_PANE"                                               # 切换焦点（一般不需要）
+tmux resize-pane -t "$SIDE_PANE" -R 10                                         # 右扩 10 列
+tmux clear-history -t "$SIDE_PANE"                                             # 清空 pane 历史缓冲
 ```
+
+**严禁**：`tmux list-panes -a`（所有 session）/ `tmux list-panes -s`（当前 session 所有 window）—— 这两个会越过 window 边界。
 
 ## 反模式与陷阱
 
+- **不要跨 window 操作** —— 不要 `new-window`、`select-window`、`move-window`、`split-window -t <other-window>`；不要 `list-panes -a` / `-s`；不要向不属于当前 window 的 pane ID 发送命令。所有侧边 pane 必须与主 pane 在同一 window，用户才能并排看到。
 - **不要用 `{up}` / `{down}`** —— tmux 没有这两个 token。上下方向请用位置类 `{top}` / `{bottom}` 或相对类 `{up-of}` / `{down-of}`。
 - **不要把 `{right}` 当作"右邻居"** —— `{right}` 是"窗口最右侧那个 pane"，与 active 无关。"当前 pane 的右邻居"是 `{right-of}`。两 pane 简单 layout 下两者结果相同，多 pane 时会指错目标。
 - **不要在 split 后立刻 `select-pane` 回主 pane** —— `send-keys -t` 用目标语法寻址，与当前焦点无关，多余的 `select-pane` 只会干扰用户视觉焦点。
