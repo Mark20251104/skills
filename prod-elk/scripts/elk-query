@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# elk-query — tcg-uss-ae 生产 ELK 只读查询包装器
+#
+# 属于 prod-elk skill，由 SKILL.md 以绝对路径直接调用，不依赖 PATH。
+# ~/.local/bin/elk-query 是指向本文件的 symlink，仅为人工在终端敲短命令方便，
+# skill 自身不依赖它——删掉不影响 skill 工作。
+#
+# 设计约束：
+#   1. 口令只存在于本进程内，经进程替换（/dev/fd）喂给 curl --config，
+#      既不进 argv、也不落盘
+#   2. 端点白名单强制只读，写操作一律拒绝
+#   3. 环境代号 → host + 传输模式集中在此，调用方不必记域名与端口差异
+#   4. HTTP 非 2xx 转成非零退出码，同时保留 ES 的错误 JSON 供诊断
+#
+# 白名单防的是误操作，不是防有写权限的调用方——能编辑本脚本的人可绕过。
+
+set -euo pipefail
+
+# 锁定 C locale：path 全为 ASCII（下方有显式校验），urlencode 里的
+# printf 字节转换与 case glob 匹配都不应受 LANG/LC_* 影响——UTF-8 locale 下
+# 非 ASCII 字节会让 printf "'\$c" 的数值转换行为随 locale 漂移。
+export LC_ALL=C
+
+KEYCHAIN_SERVICE="${ELK_SERVICE:-elk-readonly}"
+ES_USER="${ELK_USER:-dev}"
+TIMEOUT="${ELK_TIMEOUT:-60}"
+
+# 白名单的唯一事实来源：usage 与拒绝消息都引用它，避免文档与代码漂移
+READONLY_ENDPOINTS='_cat _search _count _msearch _mapping _field_caps _stats _resolve _cluster/health _cluster/state/metadata _nodes/stats'
+
+# 注意用 $1 而非 $* —— $* 会把第二个参数（退出码）也拼进消息
+die() { printf '%s\n' "$1" >&2; exit "${2:-1}"; }
+
+usage() {
+  cat >&2 <<EOF
+用法: elk-query <env> <path> [json-body | -]
+
+  env   f1..f7 / s1 / s2 / h1，或这 10 套的完整主机名（禁止任意 *.local）
+  path  以 / 开头，仅允许只读端点：
+        $READONLY_ENDPOINTS
+        _mapping 只允许 GET（不带 body）；POST/PUT 会改索引 mapping
+  body  省略 → GET；给 JSON → POST；给 - → 从 stdin 读
+
+环境变量:
+  ELK_TIMEOUT  curl 超时秒数（默认 60）
+  ELK_USER     ES 用户名（默认 dev）
+  ELK_SERVICE  keychain service 名（默认 elk-readonly）
+  ELK_MODE     强制传输模式 direct|kibana（防火墙规则变动时应急）
+
+退出码:
+  0   HTTP 2xx
+  22  HTTP 非 2xx（响应体仍打到 stdout，读它看 ES 的报错原因）
+  28  curl 超时（kibana 模式另受约 30s 代理超时限制，与 ELK_TIMEOUT 无关）
+  2   未知环境  3 path 被白名单拒绝  4 keychain 无凭据  5 未知传输模式
+
+示例:
+  elk-query f1 '/_cat/indices/*uss_ae_behavior-2026.09.04*?h=index,docs.count&s=index:asc'
+  elk-query f4 '/*uss_ae_behavior-2026.09.03*,*uss_ae_behavior-2026.09.04*/_search' \\
+    '{"size":0,"track_total_hits":true,"query":{"range":{"@timestamp":{"gte":"2026-09-04T00:00:00Z","lt":"2026-09-05T00:00:00Z"}}}}'
+EOF
+  exit 64
+}
+
+# RFC3986 编码（ES path 均为 ASCII，够用）
+urlencode() {
+  local s="$1" o="" c h i
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9._~-]) o+="$c" ;;
+      *) printf -v h '%%%02X' "'$c"; o+="$h" ;;
+    esac
+  done
+  printf '%s' "$o"
+}
+
+[ $# -ge 2 ] || usage
+[[ "$TIMEOUT" =~ ^[1-9][0-9]*$ ]] || die "拒绝：ELK_TIMEOUT 必须是正整数（大于 0），得到 '$TIMEOUT'" 1
+
+target="$1"
+path="$2"
+body="${3-}"
+
+# ---- 环境代号 → host + 传输模式 ----
+# mode=direct : :9200 直连可用
+# mode=kibana : :9200 被防火墙 DROP，只开 :443，走 Kibana console proxy
+# 实测日期 2026-09-04。防火墙规则若变动，用 ELK_MODE 覆盖并更新此表。
+# 只枚举这 10 套。曾用 elk-platform.*.local 通配，任意匹配名都会
+# 带上 superuser 凭据；F4–F7/S1 的完整主机名还会被错标成 direct。
+case "$target" in
+  f1|elk-platform.tcg.local)    host=elk-platform.tcg.local;    mode=direct ;;
+  f2|elk-platform.tcg-f2.local) host=elk-platform.tcg-f2.local; mode=direct ;;
+  f3|elk-platform.tcg-f3.local) host=elk-platform.tcg-f3.local; mode=direct ;;
+  f4|elk-platform.tcg-f4.local) host=elk-platform.tcg-f4.local; mode=kibana ;;
+  f5|elk-platform.tcg-f5.local) host=elk-platform.tcg-f5.local; mode=kibana ;;
+  f6|elk-platform.tcg-f6.local) host=elk-platform.tcg-f6.local; mode=kibana ;;
+  f7|elk-platform.tcg-f7.local) host=elk-platform.tcg-f7.local; mode=kibana ;;
+  s1|elk-platform.s1.local)     host=elk-platform.s1.local;     mode=kibana ;;
+  s2|elk-platform.s2.local)     host=elk-platform.s2.local;     mode=direct ;;
+  h1|elk-platform.h1.local)     host=elk-platform.h1.local;     mode=direct ;;
+  *) die "拒绝：未知环境 '$target'（可用 f1..f7 s1 s2 h1，或对应的 10 个 elk-platform 主机名）" 2 ;;
+esac
+mode="${ELK_MODE:-$mode}"
+
+# ---- 端点白名单：只读 ----
+# 两类形态：集群级（/_xxx）与索引级（/<index>/_xxx）。二者都要覆盖，
+# 否则 /_mapping、/_stats 这类裸端点会被误拒。
+case "$path" in
+  /) ;;
+  /_cat|/_cat/*|/_count*|/_search*|/_msearch*|/_mapping*|/_stats*|/_field_caps*|/_resolve/*) ;;
+  /_cluster/health*|/_cluster/state/metadata*|/_nodes/stats*) ;;
+  */_search|*/_search\?*|*/_count|*/_count\?*|*/_msearch|*/_mapping|*/_mapping\?*|*/_field_caps|*/_field_caps\?*|*/_stats|*/_stats\?*) ;;
+  *) die "拒绝：'$path' 不在只读白名单内（仅 ${READONLY_ENDPOINTS}）" 3 ;;
+esac
+
+case "$path" in
+  *$'\n'*|*$'\r'*) die "拒绝：path 含换行" 3 ;;
+  *[![:ascii:]]*)  die "拒绝：path 含非 ASCII 字符（ES path 应为 ASCII）" 3 ;;
+esac
+[ "${path:0:1}" = "/" ] || die "拒绝：path 必须以 / 开头" 3
+
+# ---- 读 stdin body（若指定 -）----
+if [ "$body" = "-" ]; then
+  body="$(cat)"
+fi
+
+# GET /_mapping 是读；POST/PUT /{index}/_mapping 是 Update field mappings。
+# 本脚本有 body 就走 POST，所以 mapping 路径禁止带 body。
+case "$path" in
+  /_mapping*|*/_mapping|*/_mapping\?*)
+    [ -z "$body" ] || die "拒绝：_mapping 只允许 GET（不带 body）；POST/PUT 会修改索引 mapping" 3
+    ;;
+esac
+
+# ---- 取口令 ----
+# 不落盘：下面用进程替换把 config 从 /dev/fd 喂给 curl。
+# 早期版本写 mktemp 临时文件 + trap 清理，但结尾的 exec curl 会替换进程映像、
+# 令 EXIT trap 永不触发，明文口令文件因此长期残留在 $TMPDIR（曾积压 48 个口令文件）。勿改回 exec。
+pw="$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null)" \
+  || die "keychain 取不到 service='$KEYCHAIN_SERVICE'。先执行：security add-generic-password -a \"\$USER\" -s $KEYCHAIN_SERVICE -w" 4
+
+# curl config 的引号字符串里 \ 与 " 需转义，否则含这两个字符的口令会被截断/错解
+pw_esc="${pw//\\/\\\\}"
+pw_esc="${pw_esc//\"/\\\"}"
+unset pw
+
+# -g 关闭 curl 的 URL globbing：否则索引名里的 [ ] { } 会被当成范围/集合语法
+# --fail-with-body 让 HTTP 非 2xx 退出码为 22，同时仍把 ES 的错误 JSON 打到 stdout
+args=(-sS -k -g --fail-with-body --max-time "$TIMEOUT")
+
+case "$mode" in
+  direct)
+    if [ -n "$body" ]; then
+      args+=(-X POST -H 'Content-Type: application/json' --data-binary "$body")
+    else
+      args+=(-X GET)
+    fi
+    url="https://${host}:9200${path}"
+    ;;
+
+  kibana)
+    # Kibana console proxy：外层恒为 POST，实际 ES 方法由 method 参数指定。
+    # 实测接受 Authorization: Basic，不必先拿 session cookie。
+    # 代理约 30s 超时，大索引聚合需分索引查。
+    es_method=GET
+    [ -n "$body" ] && es_method=POST
+    url="https://${host}/api/console/proxy?path=$(urlencode "${path#/}")&method=${es_method}"
+    args+=(-X POST -H 'kbn-xsrf: true')
+    if [ -n "$body" ]; then
+      args+=(-H 'Content-Type: application/json' --data-binary "$body")
+    else
+      args+=(--data-binary '')
+    fi
+    ;;
+
+  *) die "拒绝：未知传输模式 '$mode'（direct|kibana）" 5 ;;
+esac
+
+rc=0
+curl "${args[@]}" --config <(printf 'user = "%s:%s"\n' "$ES_USER" "$pw_esc") "$url" || rc=$?
+
+if [ "$rc" -ne 0 ]; then
+  case "$rc" in
+    22) printf 'elk-query: HTTP 非 2xx（响应体见上，通常是 ES 的 error.reason）\n' >&2 ;;
+    28) printf 'elk-query: 超时 %ss。kibana 模式受约 30s 代理上限，加大 ELK_TIMEOUT 无用——改为分索引查或换轻量聚合。\n' "$TIMEOUT" >&2 ;;
+    *)  printf 'elk-query: curl 退出码 %s\n' "$rc" >&2 ;;
+  esac
+fi
+exit "$rc"
